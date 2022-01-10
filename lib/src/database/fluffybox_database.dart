@@ -1432,6 +1432,49 @@ class FluffyBoxDatabase extends DatabaseApi {
     if (raw == null) return null;
     return raw;
   }
+
+  @override
+  Future<List<Event>> getEvents(
+    int clientId,
+    Room room, {
+    List<String>? eventTypes,
+    List<String>? messageTypes,
+    int count = 50,
+    DateTime? createdAt,
+    bool excludeRedacted = true,
+  }) async {
+    final events = <Event>[];
+    final eventsBoxKeys = await _eventsBox.getAllKeys();
+    for (final key in eventsBoxKeys) {
+      if (!key.toString().contains(room.id)) continue;
+
+      final value = await _eventsBox.get(key);
+      if (value == null) continue;
+
+      final event = Event.fromJson(convertToJson(value), room);
+
+      if (excludeRedacted && event.redacted) continue;
+      if (eventTypes != null &&
+          eventTypes.isNotEmpty &&
+          !eventTypes.contains(event.type)) continue;
+
+      if (messageTypes != null &&
+          messageTypes.isNotEmpty &&
+          !messageTypes.contains(event.messageType)) continue;
+
+      if (createdAt != null && event.originServerTs.compareTo(createdAt) > -1) {
+        continue;
+      }
+
+      events.add(event);
+    }
+
+    events.sort((a, b) => b.originServerTs.compareTo(a.originServerTs));
+
+    return events
+        .getRange(0, count > events.length ? events.length : count)
+        .toList();
+  }
 }
 
 class TupleKey {

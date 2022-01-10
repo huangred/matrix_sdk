@@ -306,4 +306,14 @@ abstract class DatabaseApi {
   Future<dynamic> close();
 
   Future<T> transaction<T>(Future<T> Function() action);
+
+  Future<List<Event>> getEvents(
+    int clientId,
+    Room room, {
+    List<String> eventTypes,
+    List<String> messageTypes,
+    int count,
+    DateTime createdAt,
+    bool excludeRedacted,
+  });
 }
