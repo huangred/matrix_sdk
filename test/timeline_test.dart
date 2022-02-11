@@ -144,12 +144,12 @@ void main() {
       await Future.delayed(Duration(milliseconds: 50));
 
       expect(updateCount, 3);
-      expect(insertList, [0, 0]);
+      expect(insertList, [0, 0, 0]);
       expect(insertList.length, timeline.events.length);
-      expect(changeList, [1]);
+      expect(changeList, [2]);
       expect(removeList, []);
-      expect(timeline.events.length, 2);
-      expect(timeline.events[1].redacted, true);
+      expect(timeline.events.length, 3);
+      expect(timeline.events[2].redacted, true);
     });
 
     test('Send message', () async {
@@ -158,7 +158,7 @@ void main() {
       await Future.delayed(Duration(milliseconds: 50));
 
       expect(updateCount, 5);
-      expect(insertList, [0, 0, 0]);
+      expect(insertList, [0, 0, 0, 0]);
       expect(insertList.length, timeline.events.length);
       final eventId = timeline.events[0].eventId;
       expect(eventId.startsWith('\$event'), true);
@@ -181,7 +181,7 @@ void main() {
       await Future.delayed(Duration(milliseconds: 50));
 
       expect(updateCount, 6);
-      expect(insertList, [0, 0, 0]);
+      expect(insertList, [0, 0, 0, 0]);
       expect(insertList.length, timeline.events.length);
       expect(timeline.events[0].eventId, eventId);
       expect(timeline.events[0].status, EventStatus.synced);
@@ -213,9 +213,9 @@ void main() {
       await Future.delayed(Duration(milliseconds: 50));
 
       expect(updateCount, 13);
-      expect(insertList, [0, 0, 0, 0, 0, 1, 2]);
+      expect(insertList, [0, 0, 0, 0, 0, 0, 1, 2]);
       expect(insertList.length, timeline.events.length);
-      expect(changeList, [1, 0, 0, 0, 1, 2]);
+      expect(changeList, [2, 0, 0, 0, 1, 2]);
       expect(removeList, []);
       expect(timeline.events[0].status, EventStatus.error);
       expect(timeline.events[1].status, EventStatus.error);
@@ -229,10 +229,10 @@ void main() {
 
       expect(updateCount, 14);
 
-      expect(insertList, [0, 0, 0, 0, 0, 1, 2]);
-      expect(changeList, [1, 0, 0, 0, 1, 2]);
+      expect(insertList, [0, 0, 0, 0, 0, 0, 1, 2]);
+      expect(changeList, [2, 0, 0, 0, 1, 2]);
       expect(removeList, [0]);
-      expect(timeline.events.length, 6);
+      expect(timeline.events.length, 7);
       expect(timeline.events[0].status, EventStatus.error);
     });
 
@@ -276,8 +276,8 @@ void main() {
 
       expect(updateCount, 17);
 
-      expect(insertList, [0, 0, 0, 0, 0, 1, 2, 0]);
-      expect(changeList, [1, 0, 0, 0, 1, 2, 0, 0]);
+      expect(insertList, [0, 0, 0, 0, 0, 0, 1, 2, 0]);
+      expect(changeList, [2, 0, 0, 0, 1, 2, 0, 0]);
       expect(removeList, [0]);
       expect(timeline.events.length, 1);
       expect(timeline.events[0].status, EventStatus.sent);
@@ -291,7 +291,7 @@ void main() {
       await Future.delayed(Duration(milliseconds: 50));
 
       expect(updateCount, 20);
-      expect(insertList, [0, 0, 0, 0, 0, 1, 2, 0, 0, 1, 2]);
+      expect(insertList, [0, 0, 0, 0, 0, 0, 1, 2, 0, 0, 1, 2]);
       expect(timeline.events.length, 3);
       expect(timeline.events[0].eventId, '3143273582443PhrSn:example.org');
       expect(timeline.events[1].eventId, '2143273582443PhrSn:example.org');

@@ -1,3 +1,31 @@
+## [0.8.4] - 08nd Feb 2022
+- fix: Call onChange correctly on redacted aggregation events
+
+## [0.8.3] - 07nd Feb 2022
+- fix: Remove onHistoryReceived which was broken anyway
+- fix: Remove aggregation event doesnt trigger onChange
+
+## [0.8.2] - 04nd Feb 2022
+- fix: Add redaction events to timeline
+- fix: Resize image with compute by using const class arguments
+
+## [0.8.1] - 03nd Feb 2022
+- refactor: Implement on history received in timeline
+- fix: null-safety issues with widgets
+- fix: Trigger onChange for index on aggregation event update
+- feat: implement to get a room's widgets
+
+## [0.8.0] - 25nd Jan 2022
+- BREAKING CHANGE: high-level hadling of image sizes
+- feat: expose Timeline.onChange to Room.getTimeline
+- fix: Use where and map instead of a loop and a removeWhere
+- fix: Remove sorts that shouldnt be required.
+
+## [0.7.3] - 14nd Jan 2022
+- fix: Fix turn credentials format issue for safari.
+- fix: update fluffybox version to correctly clear rooms after logout. 
+- fix: Allow unpadded base64 decoding
+
 ## [0.7.2] - 08nd Jan 2022
 - feat: Let sendDefaultMessage return false on encryption failure (Krille Fear)
 - fix: Room Member updates should always be cached (Krille Fear)

@@ -24,6 +24,7 @@ import 'package:collection/collection.dart';
 import 'package:html_unescape/html_unescape.dart';
 import 'package:matrix/src/utils/crypto/crypto.dart';
 import 'package:matrix/src/utils/space_child.dart';
+import 'package:matrix/widget.dart';
 
 import '../matrix.dart';
 import 'utils/markdown.dart';
@@ -369,6 +370,17 @@ class Room {
         : [];
   }
 
+  /// Returns all present Widgets in the room.
+  List<MatrixWidget> get widgets => {
+        ...states['m.widget'] ?? {},
+        ...states['im.vector.modular.widgets'] ?? {},
+      }
+          .values
+          .map(
+            (e) => MatrixWidget.fromJson(e.content, this),
+          )
+          .toList();
+
   /// Your current client instance.
   final Client client;
 
@@ -501,7 +513,7 @@ class Room {
   /// Returns true if this room is unread
   bool get isUnread => notificationCount > 0 || markedUnread;
 
-  @Deprecated('Use [markUnread] instead')
+  @Deprecated('Use [markUnread] instead')
   Future<void> setUnread(bool unread) => markUnread(unread);
 
   /// Sets an unread flag manually for this room. This changes the local account
@@ -625,6 +637,9 @@ class Room {
   /// the message event has received the server. Otherwise the future will only
   /// wait until the file has been uploaded.
   /// Optionally specify [extraContent] to tack on to the event.
+  ///
+  /// In case [file] is a [MatrixImageFile], [thumbnail] is automatically
+  /// computed unless it is explicitly provided.
   Future<Uri> sendFileEvent(
     MatrixFile file, {
     String? txid,
@@ -635,6 +650,10 @@ class Room {
     Map<String, dynamic>? extraContent,
   }) async {
     MatrixFile uploadFile = file; // ignore: omit_local_variable_types
+    // computing the thumbnail in case we can
+    thumbnail ??= (file is MatrixImageFile && encrypted
+        ? await file.generateThumbnail(compute: client.runInBackground)
+        : null);
     MatrixFile? uploadThumbnail =
         thumbnail; // ignore: omit_local_variable_types
     EncryptedFile? encryptedFile;
@@ -964,7 +983,8 @@ class Room {
   /// Request more previous events from the server. [historyCount] defines how much events should
   /// be received maximum. When the request is answered, [onHistoryReceived] will be triggered **before**
   /// the historical events will be published in the onEvent stream.
-  Future<void> requestHistory(
+  /// Returns the actual count of received timeline events.
+  Future<int> requestHistory(
       {int historyCount = defaultHistoryCount,
       void Function()? onHistoryReceived}) async {
     final prev_batch = this.prev_batch;
@@ -1025,6 +1045,8 @@ class Room {
     } else {
       await loadFn();
     }
+
+    return resp.chunk?.length ?? 0;
   }
 
   /// Sets this room as a direct chat for this user if not already.
@@ -1109,10 +1131,16 @@ class Room {
     return;
   }
 
-  /// Creates a timeline from the store. Returns a [Timeline] object.
-  Future<Timeline> getTimeline(
-      {void Function()? onUpdate,
-      void Function(int insertID)? onInsert}) async {
+  /// Creates a timeline from the store. Returns a [Timeline] object. If you
+  /// just want to update the whole timeline on every change, use the [onUpdate]
+  /// callback. For updating only the parts that have changed, use the
+  /// [onChange], [onRemove], [onInsert] and the [onHistoryReceived] callbacks.
+  Future<Timeline> getTimeline({
+    void Function(int index)? onChange,
+    void Function(int index)? onRemove,
+    void Function(int insertID)? onInsert,
+    void Function()? onUpdate,
+  }) async {
     await postLoad();
     var events;
     events = await client.database?.getEventList(
@@ -1137,8 +1165,10 @@ class Room {
     final timeline = Timeline(
       room: this,
       events: events,
-      onUpdate: onUpdate,
+      onChange: onChange,
+      onRemove: onRemove,
       onInsert: onInsert,
+      onUpdate: onUpdate,
     );
     if (client.database == null) {
       await requestHistory(historyCount: 10);
@@ -1158,16 +1188,15 @@ class Room {
         Membership.invite,
         Membership.knock,
       ]]) {
-    final userList = <User>[];
     final members = states[EventTypes.RoomMember];
     if (members != null) {
-      for (final entry in members.entries) {
-        final state = entry.value;
-        if (state.type == EventTypes.RoomMember) userList.add(state.asUser);
-      }
+      return members.entries
+          .where((entry) => entry.value.type == EventTypes.RoomMember)
+          .map((entry) => entry.value.asUser)
+          .where((user) => membershipFilter.contains(user.membership))
+          .toList();
     }
-    userList.removeWhere((u) => !membershipFilter.contains(u.membership));
-    return userList;
+    return <User>[];
   }
 
   bool _requestedParticipants = false;
