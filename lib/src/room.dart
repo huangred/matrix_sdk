@@ -167,11 +167,7 @@ class Room {
       return;
     }
 
-    final isMessageEvent = [
-      EventTypes.Message,
-      EventTypes.Sticker,
-      EventTypes.Encrypted,
-    ].contains(state.type);
+    final isMessageEvent = client.roomPreviewLastEvents.contains(state.type);
 
     // We ignore events editing events older than the current-latest here so
     // i.e. newly sent edits for older events don't show up in room preview
@@ -229,7 +225,7 @@ class Room {
   /// list.
   List<String> get pinnedEventIds {
     final pinned = getState(EventTypes.RoomPinnedEvents)?.content['pinned'];
-    return pinned is List<String> ? pinned : [];
+    return pinned is Iterable ? pinned.map((e) => e.toString()).toList() : [];
   }
 
   /// Returns a localized displayname for this server. If the room is a groupchat
@@ -374,12 +370,13 @@ class Room {
   List<MatrixWidget> get widgets => {
         ...states['m.widget'] ?? {},
         ...states['im.vector.modular.widgets'] ?? {},
-      }
-          .values
-          .map(
-            (e) => MatrixWidget.fromJson(e.content, this),
-          )
-          .toList();
+      }.values.expand((e) {
+        try {
+          return [MatrixWidget.fromJson(e.content, this)];
+        } catch (_) {
+          return <MatrixWidget>[];
+        }
+      }).toList();
 
   /// Your current client instance.
   final Client client;
@@ -510,7 +507,37 @@ class Room {
         .unread;
   }
 
-  /// Returns true if this room is unread
+  /// Checks if the last event has a read marker of the user.
+  /// Warning: This compares the origin server timestamp which might not map
+  /// to the real sort order of the timeline.
+  bool get hasNewMessages {
+    final lastEvent = this.lastEvent;
+
+    // There is no known event or the last event is only a state fallback event,
+    // we assume there is no new messages.
+    if (lastEvent == null ||
+        !client.roomPreviewLastEvents.contains(lastEvent.type)) return false;
+
+    // Read marker is on the last event so no new messages.
+    if (lastEvent.receipts
+        .any((receipt) => receipt.user.senderId == client.userID!)) {
+      return false;
+    }
+
+    // If the last event is sent, we mark the room as read.
+    if (lastEvent.senderId == client.userID) return false;
+
+    // Get the timestamp of read marker and compare
+    final readAtMilliseconds = roomAccountData['m.receipt']
+            ?.content
+            .tryGetMap<String, dynamic>(client.userID!)
+            ?.tryGet<int>('ts') ??
+        0;
+    return readAtMilliseconds < lastEvent.originServerTs.millisecondsSinceEpoch;
+  }
+
+  /// Returns true if this room is unread. To check if there are new messages
+  /// in muted rooms, use [hasNewMessages].
   bool get isUnread => notificationCount > 0 || markedUnread;
 
   @Deprecated('Use [markUnread] instead')

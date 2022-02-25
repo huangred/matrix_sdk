@@ -383,12 +383,12 @@ class CallSession {
 
     setCallState(CallState.kRinging);
 
-    ringingTimer = Timer(Duration(milliseconds: lifetime - 3000), () {
+    ringingTimer = Timer(Duration(milliseconds: 30000 - lifetime), () {
       if (state == CallState.kRinging) {
         Logs().v('[VOIP] Call invite has expired. Hanging up.');
         hangupParty = CallParty.kRemote; // effectively
-        setCallState(CallState.kEnded);
         fireCallEvent(CallEvent.kHangup);
+        hangup(CallErrorCode.InviteTimeout);
       }
       ringingTimer?.cancel();
       ringingTimer = null;
@@ -538,6 +538,11 @@ class CallSession {
         if (stream == null) {
           return false;
         }
+        stream.getVideoTracks().forEach((track) {
+          track.onEnded = () {
+            setScreensharingEnabled(false);
+          };
+        });
         _addLocalStream(stream, SDPStreamMetadataPurpose.Screenshare);
         return true;
       } catch (err) {

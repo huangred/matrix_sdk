@@ -1,3 +1,31 @@
+## [0.8.11] - 19nd Feb 2022
+- fix: Change password using email authentication
+
+## [0.8.10] - 19nd Feb 2022
+- chore: Increase default thumbnail size to 800
+- fix: sortRooms should be triggered right before onSync is called
+- fix: UIA request stucks forever on unexpected matrixExceptions
+
+## [0.8.9] - 16nd Feb 2022
+- feat: Return homeserver summary on checkHomeserver
+- fix: hasNewMessage true when last event is sent
+- fix: Correctly end the call.
+
+## [0.8.8] - 15nd Feb 2022
+- fix: Has new messages compares ts
+- fix: handle dynamic content for pinned events
+
+## [0.8.7] - 14nd Feb 2022
+- fix: Show reactions as last events and refactor hasNewMessage
+
+## [0.8.6] - 14nd Feb 2022
+- feat: Add hasNewMessages flag to room
+- fix: Sort rooms after updating the UI on web
+
+## [0.8.5] - 14nd Feb 2022
+- fix: exception on removed widgets
+- fix: Fix black screen when end screensharing with system buttons.
+
 ## [0.8.4] - 08nd Feb 2022
 - fix: Call onChange correctly on redacted aggregation events
 

@@ -190,6 +190,7 @@ class Client extends MatrixApi {
       EventTypes.Message,
       EventTypes.Encrypted,
       EventTypes.Sticker,
+      EventTypes.Reaction,
     ]);
 
     // register all the default commands
@@ -341,21 +342,11 @@ class Client extends MatrixApi {
     }
   }
 
-  @Deprecated('Use [checkHomeserver] instead.')
-  Future<bool> checkServer(dynamic serverUrl) async {
-    try {
-      await checkHomeserver(serverUrl);
-    } catch (_) {
-      return false;
-    }
-    return true;
-  }
-
   /// Checks the supported versions of the Matrix protocol and the supported
   /// login types. Throws an exception if the server is not compatible with the
   /// client and sets [homeserver] to [homeserverUrl] if it is. Supports the
   /// types `Uri` and `String`.
-  Future<DiscoveryInformation?> checkHomeserver(dynamic homeserverUrl,
+  Future<HomeserverSummary> checkHomeserver(dynamic homeserverUrl,
       {bool checkWellKnown = true}) async {
     try {
       var homeserver = this.homeserver =
@@ -388,7 +379,11 @@ class Client extends MatrixApi {
             loginTypes.map((f) => f.type ?? '').toSet(), supportedLoginTypes);
       }
 
-      return wellKnown;
+      return HomeserverSummary(
+        discoveryInformation: wellKnown,
+        versions: versions,
+        loginFlows: loginTypes,
+      );
     } catch (_) {
       homeserver = null;
       rethrow;
@@ -847,7 +842,7 @@ class Client extends MatrixApi {
   static const List<String> supportedGroupEncryptionAlgorithms = [
     AlgorithmTypes.megolmV1AesSha2
   ];
-  static const int defaultThumbnailSize = 256;
+  static const int defaultThumbnailSize = 800;
 
   /// The newEvent signal is the most important signal in this concept. Every time
   /// the app receives a new synchronization, this event is called for every signal
@@ -1331,7 +1326,6 @@ class Client extends MatrixApi {
       if (leave != null) {
         await _handleRooms(leave, sortAtTheEnd: sortAtTheEnd);
       }
-      _sortRooms();
     }
     for (final newPresence in sync.presence ?? []) {
       presences[newPresence.senderId] = newPresence;
@@ -1354,6 +1348,7 @@ class Client extends MatrixApi {
       encryption?.handleDeviceOneTimeKeysCount(
           sync.deviceOneTimeKeysCount, sync.deviceUnusedFallbackKeyTypes);
     }
+    _sortRooms();
     onSync.add(sync);
   }
 
@@ -2237,9 +2232,8 @@ class Client extends MatrixApi {
       AuthenticationData? auth,
       bool? logoutDevices}) async {
     final userID = this.userID;
-    if (userID == null) return;
     try {
-      if (oldPassword != null) {
+      if (oldPassword != null && userID != null) {
         auth = AuthenticationPassword(
           identifier: AuthenticationUserIdentifier(user: userID),
           password: oldPassword,
@@ -2257,7 +2251,7 @@ class Client extends MatrixApi {
               false)) {
         rethrow;
       }
-      if (oldPassword == null) {
+      if (oldPassword == null || userID == null) {
         rethrow;
       }
       return changePassword(
@@ -2532,4 +2526,16 @@ class BadServerLoginTypesException implements Exception {
   @override
   String toString() =>
       'Server supports the Login Types: ${serverLoginTypes.toString()} but this application is only compatible with ${supportedLoginTypes.toString()}.';
+}
+
+class HomeserverSummary {
+  final DiscoveryInformation? discoveryInformation;
+  final GetVersionsResponse versions;
+  final List<LoginFlow> loginFlows;
+
+  HomeserverSummary({
+    required this.discoveryInformation,
+    required this.versions,
+    required this.loginFlows,
+  });
 }

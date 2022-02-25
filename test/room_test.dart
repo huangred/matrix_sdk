@@ -185,6 +185,7 @@ void main() {
           stateKey: '',
         ),
       );
+      expect(room.hasNewMessages, true);
       expect(room.lastEvent?.body, 'cd');
       room.setState(
         Event(
@@ -258,6 +259,26 @@ void main() {
       expect(room.lastEvent?.eventId, '5');
       expect(room.lastEvent?.body, 'edited cdc');
       expect(room.lastEvent?.status, EventStatus.sent);
+      // Are reactions coming through?
+      room.setState(
+        Event(
+          senderId: '@test:example.com',
+          type: EventTypes.Reaction,
+          room: room,
+          eventId: '123456',
+          originServerTs: DateTime.now(),
+          content: {
+            'm.relates_to': {
+              'rel_type': RelationshipTypes.reaction,
+              'event_id': '1234',
+              'key': ':-)',
+            }
+          },
+          stateKey: '',
+        ),
+      );
+      expect(room.lastEvent?.eventId, '123456');
+      expect(room.lastEvent?.type, EventTypes.Reaction);
     });
     test('lastEvent when reply parent edited', () async {
       room.setState(
@@ -923,6 +944,62 @@ void main() {
 
     test('Widgets', () {
       expect(room.widgets.isEmpty, true);
+      room.states['m.widget'] = {
+        'test': Event.fromJson({
+          'content': {
+            'creatorUserId': '@rxl881:matrix.org',
+            'data': {'title': 'Bridges Dashboard', 'dateRange': '1y'},
+            'id': 'grafana_@rxl881:matrix.org_1514573757015',
+            'name': 'Grafana',
+            'type': 'm.grafana',
+            'url': 'https://matrix.org/grafana/whatever',
+            'waitForIframeLoad': true
+          },
+          'room_id': '!foo:bar',
+          'event_id': '\$15104760642668662QICBu:matrix.org',
+          'sender': '@rxl881:matrix.org',
+          'state_key': 'test',
+          'origin_server_ts': 1432735824653,
+          'type': 'm.widget'
+        }, room),
+      };
+      expect(room.widgets.length, 1);
+      room.states['m.widget'] = {
+        'test2': Event.fromJson({
+          'content': {
+            'creatorUserId': '@rxl881:matrix.org',
+            'data': {'title': 'Bridges Dashboard', 'dateRange': '1y'},
+            'id': 'grafana_@rxl881:matrix.org_1514573757016',
+            'type': 'm.grafana',
+            'url': 'https://matrix.org/grafana/whatever',
+            'waitForIframeLoad': true
+          },
+          'room_id': '!foo:bar',
+          'event_id': '\$15104760642668663QICBu:matrix.org',
+          'sender': '@rxl881:matrix.org',
+          'state_key': 'test2',
+          'origin_server_ts': 1432735824653,
+          'type': 'm.widget'
+        }, room),
+      };
+      expect(room.widgets.length, 1);
+      room.states['m.widget'] = {
+        'test3': Event.fromJson({
+          'content': {
+            'creatorUserId': '@rxl881:matrix.org',
+            'data': {'title': 'Bridges Dashboard', 'dateRange': '1y'},
+            'type': 'm.grafana',
+            'waitForIframeLoad': true
+          },
+          'room_id': '!foo:bar',
+          'event_id': '\$15104760642668662QICBu:matrix.org',
+          'sender': '@rxl881:matrix.org',
+          'state_key': 'test3',
+          'origin_server_ts': 1432735824655,
+          'type': 'm.widget'
+        }, room),
+      };
+      expect(room.widgets.length, 0);
     });
 
     test('Spaces', () async {
