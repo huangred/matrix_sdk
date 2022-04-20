@@ -23,16 +23,13 @@ import 'dart:typed_data';
 import 'package:collection/collection.dart';
 import 'package:html_unescape/html_unescape.dart';
 import 'package:matrix/src/utils/crypto/crypto.dart';
+import 'package:matrix/src/utils/file_send_request_credentials.dart';
 import 'package:matrix/src/utils/space_child.dart';
 import 'package:matrix/widget.dart';
 
 import '../matrix.dart';
 import 'utils/markdown.dart';
 import 'utils/marked_unread.dart';
-
-/// https://github.com/matrix-org/matrix-doc/pull/2746
-/// version 1
-const String voipProtoVersion = '1';
 
 enum PushRuleState { notify, mentionsOnly, dontNotify }
 enum JoinRules { public, knock, invite, private }
@@ -53,6 +50,9 @@ const Map<HistoryVisibility, String> _historyVisibilityMap = {
 
 const String messageSendingStatusKey =
     'com.famedly.famedlysdk.message_sending_status';
+
+const String fileSendingStatusKey =
+    'com.famedly.famedlysdk.file_sending_status';
 
 const String sortOrderKey = 'com.famedly.famedlysdk.sort_order';
 
@@ -368,8 +368,7 @@ class Room {
 
   /// Returns all present Widgets in the room.
   List<MatrixWidget> get widgets => {
-        ...states['m.widget'] ?? {},
-        ...states['im.vector.modular.widgets'] ?? {},
+        ...states['m.widget'] ?? states['im.vector.modular.widgets'] ?? {},
       }.values.expand((e) {
         try {
           return [MatrixWidget.fromJson(e.content, this)];
@@ -377,6 +376,31 @@ class Room {
           return <MatrixWidget>[];
         }
       }).toList();
+
+  Future<String> addWidget(MatrixWidget widget) {
+    final user = client.userID;
+    final widgetId =
+        widget.name!.toLowerCase().replaceAll(RegExp(r'\W'), '_') + '_' + user!;
+
+    final json = widget.toJson();
+    json['creatorUserId'] = user;
+    json['id'] = widgetId;
+    return client.setRoomStateWithKey(
+      id,
+      'im.vector.modular.widgets',
+      widgetId,
+      json,
+    );
+  }
+
+  Future<String> deleteWidget(String widgetId) {
+    return client.setRoomStateWithKey(
+      id,
+      'im.vector.modular.widgets',
+      widgetId,
+      {},
+    );
+  }
 
   /// Your current client instance.
   final Client client;
@@ -659,6 +683,9 @@ class Room {
     return sendEvent(event, txid: txid);
   }
 
+  final Map<String, MatrixFile> sendingFilePlaceholders = {};
+  final Map<String, MatrixImageFile> sendingFileThumbnails = {};
+
   /// Sends a [file] to this room after uploading it. Returns the mxc uri of
   /// the uploaded file. If [waitUntilSent] is true, the future will wait until
   /// the message event has received the server. Otherwise the future will only
@@ -667,25 +694,95 @@ class Room {
   ///
   /// In case [file] is a [MatrixImageFile], [thumbnail] is automatically
   /// computed unless it is explicitly provided.
-  Future<Uri> sendFileEvent(
+  /// Set [shrinkImageMaxDimension] to for example `1600` if you want to shrink
+  /// your image before sending. This is ignored if the File is not a
+  /// [MatrixImageFile].
+  Future<String?> sendFileEvent(
     MatrixFile file, {
     String? txid,
     Event? inReplyTo,
     String? editEventId,
-    bool waitUntilSent = false,
+    int? shrinkImageMaxDimension,
     MatrixImageFile? thumbnail,
     Map<String, dynamic>? extraContent,
   }) async {
+    txid ??= client.generateUniqueTransactionId();
+    sendingFilePlaceholders[txid] = file;
+    if (thumbnail != null) {
+      sendingFileThumbnails[txid] = thumbnail;
+    }
+
+    // Create a fake Event object as a placeholder for the uploading file:
+    final syncUpdate = SyncUpdate(
+      nextBatch: '',
+      rooms: RoomsUpdate(
+        join: {
+          id: JoinedRoomUpdate(
+            timeline: TimelineUpdate(
+              events: [
+                MatrixEvent(
+                  content: {
+                    'msgtype': file.msgType,
+                    'body': file.name,
+                    'filename': file.name,
+                  },
+                  type: EventTypes.Message,
+                  eventId: txid,
+                  senderId: client.userID!,
+                  originServerTs: DateTime.now(),
+                  unsigned: {
+                    messageSendingStatusKey: EventStatus.sending.intValue,
+                    'transaction_id': txid,
+                    ...FileSendRequestCredentials(
+                      inReplyTo: inReplyTo?.eventId,
+                      editEventId: editEventId,
+                      shrinkImageMaxDimension: shrinkImageMaxDimension,
+                      extraContent: extraContent,
+                    ).toJson(),
+                  },
+                ),
+              ],
+            ),
+          ),
+        },
+      ),
+    );
+
     MatrixFile uploadFile = file; // ignore: omit_local_variable_types
     // computing the thumbnail in case we can
-    thumbnail ??= (file is MatrixImageFile && encrypted
-        ? await file.generateThumbnail(compute: client.runInBackground)
-        : null);
+    if (file is MatrixImageFile &&
+        (thumbnail == null || shrinkImageMaxDimension != null)) {
+      syncUpdate.rooms!.join!.values.first.timeline!.events!.first
+              .unsigned![fileSendingStatusKey] =
+          FileSendingStatus.generatingThumbnail.name;
+      await _handleFakeSync(syncUpdate);
+      thumbnail ??= await file.generateThumbnail(
+        compute: client.runInBackground,
+        customImageResizer: client.customImageResizer,
+      );
+      if (shrinkImageMaxDimension != null) {
+        file = await MatrixImageFile.shrink(
+          bytes: file.bytes,
+          name: file.name,
+          maxDimension: shrinkImageMaxDimension,
+          customImageResizer: client.customImageResizer,
+          compute: client.runInBackground,
+        );
+      }
+
+      if (thumbnail != null && file.size < thumbnail.size) {
+        thumbnail = null; // in this case, the thumbnail is not usefull
+      }
+    }
+
     MatrixFile? uploadThumbnail =
         thumbnail; // ignore: omit_local_variable_types
     EncryptedFile? encryptedFile;
     EncryptedFile? encryptedThumbnail;
     if (encrypted && client.fileEncryptionEnabled) {
+      syncUpdate.rooms!.join!.values.first.timeline!.events!.first
+          .unsigned![fileSendingStatusKey] = FileSendingStatus.encrypting.name;
+      await _handleFakeSync(syncUpdate);
       encryptedFile = await file.encrypt();
       uploadFile = encryptedFile.toMatrixFile();
 
@@ -694,18 +791,43 @@ class Room {
         uploadThumbnail = encryptedThumbnail.toMatrixFile();
       }
     }
-    final uploadResp = await client.uploadContent(
-      uploadFile.bytes,
-      filename: uploadFile.name,
-      contentType: uploadFile.mimeType,
-    );
-    final thumbnailUploadResp = uploadThumbnail != null
-        ? await client.uploadContent(
-            uploadThumbnail.bytes,
-            filename: uploadThumbnail.name,
-            contentType: uploadThumbnail.mimeType,
-          )
-        : null;
+    Uri? uploadResp, thumbnailUploadResp;
+
+    final timeoutDate = DateTime.now().add(client.sendTimelineEventTimeout);
+
+    syncUpdate.rooms!.join!.values.first.timeline!.events!.first
+        .unsigned![fileSendingStatusKey] = FileSendingStatus.uploading.name;
+    while (uploadResp == null ||
+        (uploadThumbnail != null && thumbnailUploadResp == null)) {
+      try {
+        uploadResp = await client.uploadContent(
+          uploadFile.bytes,
+          filename: uploadFile.name,
+          contentType: uploadFile.mimeType,
+        );
+        thumbnailUploadResp = uploadThumbnail != null
+            ? await client.uploadContent(
+                uploadThumbnail.bytes,
+                filename: uploadThumbnail.name,
+                contentType: uploadThumbnail.mimeType,
+              )
+            : null;
+      } on MatrixException catch (_) {
+        syncUpdate.rooms!.join!.values.first.timeline!.events!.first
+            .unsigned![messageSendingStatusKey] = EventStatus.error.intValue;
+        await _handleFakeSync(syncUpdate);
+        rethrow;
+      } catch (_) {
+        if (DateTime.now().isAfter(timeoutDate)) {
+          syncUpdate.rooms!.join!.values.first.timeline!.events!.first
+              .unsigned![messageSendingStatusKey] = EventStatus.error.intValue;
+          await _handleFakeSync(syncUpdate);
+          rethrow;
+        }
+        Logs().v('Send File into room failed. Try again...');
+        await Future.delayed(Duration(seconds: 1));
+      }
+    }
 
     // Send event
     final content = <String, dynamic>{
@@ -748,19 +870,22 @@ class Room {
             'hashes': {'sha256': encryptedThumbnail.sha256}
           },
         if (thumbnail != null) 'thumbnail_info': thumbnail.info,
+        if (thumbnail?.blurhash != null &&
+            file is MatrixImageFile &&
+            file.blurhash == null)
+          'xyz.amorgan.blurhash': thumbnail!.blurhash
       },
       if (extraContent != null) ...extraContent,
     };
-    final sendResponse = sendEvent(
+    final eventId = await sendEvent(
       content,
       txid: txid,
       inReplyTo: inReplyTo,
       editEventId: editEventId,
     );
-    if (waitUntilSent) {
-      await sendResponse;
-    }
-    return uploadResp;
+    sendingFilePlaceholders.remove(txid);
+    sendingFileThumbnails.remove(txid);
+    return eventId;
   }
 
   Future<String?> _sendContent(
@@ -769,14 +894,18 @@ class Room {
     String? txid,
   }) async {
     txid ??= client.generateUniqueTransactionId();
+
     final mustEncrypt = encrypted && client.encryptionEnabled;
+
     final sendMessageContent = mustEncrypt
         ? await client.encryption!
             .encryptGroupMessagePayload(id, content, type: type)
         : content;
     return await client.sendMessage(
       id,
-      mustEncrypt ? EventTypes.Encrypted : type,
+      sendMessageContent.containsKey('ciphertext')
+          ? EventTypes.Encrypted
+          : type,
       txid,
       sendMessageContent,
     );
@@ -888,6 +1017,7 @@ class Room {
     );
     await _handleFakeSync(syncUpdate);
 
+    final timeoutDate = DateTime.now().add(client.sendTimelineEventTimeout);
     // Send the text and on success, store and display a *sent* event.
     String? res;
     while (res == null) {
@@ -898,20 +1028,15 @@ class Room {
           txid: messageID,
         );
       } catch (e, s) {
-        if ((DateTime.now().millisecondsSinceEpoch -
-                sentDate.millisecondsSinceEpoch) <
-            (1000 * client.sendMessageTimeoutSeconds)) {
-          Logs().w('[Client] Problem while sending message because of "' +
-              e.toString() +
-              '". Try again in 1 seconds...');
-          await Future.delayed(Duration(seconds: 1));
-        } else {
-          Logs().w('[Client] Problem while sending message', e, s);
+        if (e is MatrixException || DateTime.now().isAfter(timeoutDate)) {
+          Logs().w('Problem while sending message', e, s);
           syncUpdate.rooms!.join!.values.first.timeline!.events!.first
               .unsigned![messageSendingStatusKey] = EventStatus.error.intValue;
           await _handleFakeSync(syncUpdate);
           return null;
         }
+        Logs().w('Problem while sending message: $e Try again in 1 seconds...');
+        await Future.delayed(Duration(seconds: 1));
       }
     }
     syncUpdate.rooms!.join!.values.first.timeline!.events!.first
@@ -1169,8 +1294,7 @@ class Room {
     void Function()? onUpdate,
   }) async {
     await postLoad();
-    var events;
-    events = await client.database?.getEventList(
+    final events = await client.database?.getEventList(
           this,
           limit: defaultHistoryCount,
         ) ??
@@ -1182,11 +1306,18 @@ class Room {
         for (var i = 0; i < events.length; i++) {
           if (events[i].type == EventTypes.Encrypted &&
               events[i].content['can_request_session'] == true) {
-            events[i] = await client.encryption
-                ?.decryptRoomEvent(id, events[i], store: true);
+            events[i] = await client.encryption!
+                .decryptRoomEvent(id, events[i], store: true);
           }
         }
       });
+    }
+
+    // Fetch all users from database we have got here.
+    for (final event in events) {
+      if (getState(EventTypes.RoomMember, event.senderId) != null) continue;
+      final dbUser = await client.database?.getUser(event.senderId, this);
+      if (dbUser != null) setState(dbUser);
     }
 
     final timeline = Timeline(
@@ -1197,9 +1328,6 @@ class Room {
       onInsert: onInsert,
       onUpdate: onUpdate,
     );
-    if (client.database == null) {
-      await requestHistory(historyCount: 10);
-    }
     return timeline;
   }
 
@@ -1323,6 +1451,8 @@ class Room {
         EventTypes.RoomMember,
         mxID,
       );
+    } on MatrixException catch (_) {
+      // Ignore if we have no permission
     } catch (e, s) {
       if (!ignoreErrors) {
         _requestingMatrixIds.remove(mxID);
@@ -1383,9 +1513,12 @@ class Room {
     return user;
   }
 
-  /// Searches for the event on the server. Returns null if not found.
+  /// Searches for the event in the local cache and then on the server if not
+  /// found. Returns null if not found anywhere.
   Future<Event?> getEventById(String eventID) async {
     try {
+      final dbEvent = await client.database?.getEventById(eventID, this);
+      if (dbEvent != null) return dbEvent;
       final matrixEvent = await client.getOneRoomEvent(id, eventID);
       final event = Event.fromMatrixEvent(matrixEvent, this);
       if (event.type == EventTypes.Encrypted && client.encryptionEnabled) {
@@ -1446,7 +1579,8 @@ class Room {
   }
 
   bool _hasPermissionFor(String action) {
-    final pl = getState(EventTypes.RoomPowerLevels)?.content[action];
+    final pl =
+        getState(EventTypes.RoomPowerLevels)?.content.tryGet<int>(action);
     if (pl == null) {
       return true;
     }
@@ -1476,8 +1610,10 @@ class Room {
   bool get canChangePowerLevel => canSendEvent(EventTypes.RoomPowerLevels);
 
   bool canSendEvent(String eventType) {
-    final pl =
-        getState(EventTypes.RoomPowerLevels)?.content['events']?[eventType];
+    final pl = getState(EventTypes.RoomPowerLevels)
+        ?.content
+        .tryGetMap<String, dynamic>('events')
+        ?.tryGet<int>(eventType);
     if (pl == null) {
       return eventType == EventTypes.Message
           ? canSendDefaultMessages
@@ -1601,290 +1737,6 @@ class Room {
   @Deprecated('Use sendTypingNotification instead')
   Future<void> sendTypingInfo(bool isTyping, {int? timeout}) =>
       setTyping(isTyping, timeout: timeout);
-
-  /// This is sent by the caller when they wish to establish a call.
-  /// [callId] is a unique identifier for the call.
-  /// [version] is the version of the VoIP specification this message adheres to. This specification is version 1.
-  /// [lifetime] is the time in milliseconds that the invite is valid for. Once the invite age exceeds this value,
-  /// clients should discard it. They should also no longer show the call as awaiting an answer in the UI.
-  /// [type] The type of session description. Must be 'offer'.
-  /// [sdp] The SDP text of the session description.
-  /// [invitee] The user ID of the person who is being invited. Invites without an invitee field are defined to be
-  /// intended for any member of the room other than the sender of the event.
-  /// [party_id] The party ID for call, Can be set to client.deviceId.
-  Future<String?> inviteToCall(
-      String callId, int lifetime, String party_id, String? invitee, String sdp,
-      {String type = 'offer',
-      String version = voipProtoVersion,
-      String? txid,
-      CallCapabilities? capabilities,
-      SDPStreamMetadata? metadata}) async {
-    txid ??= 'txid${DateTime.now().millisecondsSinceEpoch}';
-
-    final content = {
-      'call_id': callId,
-      'party_id': party_id,
-      'version': version,
-      'lifetime': lifetime,
-      'offer': {'sdp': sdp, 'type': type},
-      if (invitee != null) 'invitee': invitee,
-      if (capabilities != null) 'capabilities': capabilities.toJson(),
-      if (metadata != null) sdpStreamMetadataKey: metadata.toJson(),
-    };
-    return await _sendContent(
-      EventTypes.CallInvite,
-      content,
-      txid: txid,
-    );
-  }
-
-  /// The calling party sends the party_id of the first selected answer.
-  ///
-  /// Usually after receiving the first answer sdp in the client.onCallAnswer event,
-  /// save the `party_id`, and then send `CallSelectAnswer` to others peers that the call has been picked up.
-  ///
-  /// [callId] is a unique identifier for the call.
-  /// [version] is the version of the VoIP specification this message adheres to. This specification is version 1.
-  /// [party_id] The party ID for call, Can be set to client.deviceId.
-  /// [selected_party_id] The party ID for the selected answer.
-  Future<String?> selectCallAnswer(
-      String callId, int lifetime, String party_id, String selected_party_id,
-      {String version = voipProtoVersion, String? txid}) async {
-    txid ??= 'txid${DateTime.now().millisecondsSinceEpoch}';
-
-    final content = {
-      'call_id': callId,
-      'party_id': party_id,
-      'version': version,
-      'lifetime': lifetime,
-      'selected_party_id': selected_party_id,
-    };
-
-    return await _sendContent(
-      EventTypes.CallSelectAnswer,
-      content,
-      txid: txid,
-    );
-  }
-
-  /// Reject a call
-  /// [callId] is a unique identifier for the call.
-  /// [version] is the version of the VoIP specification this message adheres to. This specification is version 1.
-  /// [party_id] The party ID for call, Can be set to client.deviceId.
-  Future<String?> sendCallReject(String callId, int lifetime, String party_id,
-      {String version = voipProtoVersion, String? txid}) async {
-    txid ??= 'txid${DateTime.now().millisecondsSinceEpoch}';
-
-    final content = {
-      'call_id': callId,
-      'party_id': party_id,
-      'version': version,
-      'lifetime': lifetime,
-    };
-
-    return await _sendContent(
-      EventTypes.CallReject,
-      content,
-      txid: txid,
-    );
-  }
-
-  /// When local audio/video tracks are added/deleted or hold/unhold,
-  /// need to createOffer and renegotiation.
-  /// [callId] is a unique identifier for the call.
-  /// [version] is the version of the VoIP specification this message adheres to. This specification is version 1.
-  /// [party_id] The party ID for call, Can be set to client.deviceId.
-  Future<String?> sendCallNegotiate(
-      String callId, int lifetime, String party_id, String sdp,
-      {String type = 'offer',
-      String version = voipProtoVersion,
-      String? txid,
-      CallCapabilities? capabilities,
-      SDPStreamMetadata? metadata}) async {
-    txid ??= 'txid${DateTime.now().millisecondsSinceEpoch}';
-    final content = {
-      'call_id': callId,
-      'party_id': party_id,
-      'version': version,
-      'lifetime': lifetime,
-      'description': {'sdp': sdp, 'type': type},
-      if (capabilities != null) 'capabilities': capabilities.toJson(),
-      if (metadata != null) sdpStreamMetadataKey: metadata.toJson(),
-    };
-    return await _sendContent(
-      EventTypes.CallNegotiate,
-      content,
-      txid: txid,
-    );
-  }
-
-  /// This is sent by callers after sending an invite and by the callee after answering.
-  /// Its purpose is to give the other party additional ICE candidates to try using to communicate.
-  ///
-  /// [callId] The ID of the call this event relates to.
-  ///
-  /// [version] The version of the VoIP specification this messages adheres to. This specification is version 1.
-  ///
-  /// [party_id] The party ID for call, Can be set to client.deviceId.
-  ///
-  /// [candidates] Array of objects describing the candidates. Example:
-  ///
-  /// ```
-  /// [
-  ///       {
-  ///           "candidate": "candidate:863018703 1 udp 2122260223 10.9.64.156 43670 typ host generation 0",
-  ///           "sdpMLineIndex": 0,
-  ///           "sdpMid": "audio"
-  ///       }
-  ///   ],
-  /// ```
-  Future<String?> sendCallCandidates(
-    String callId,
-    String party_id,
-    List<Map<String, dynamic>> candidates, {
-    String version = voipProtoVersion,
-    String? txid,
-  }) async {
-    txid ??= 'txid${DateTime.now().millisecondsSinceEpoch}';
-    final content = {
-      'call_id': callId,
-      'party_id': party_id,
-      'version': version,
-      'candidates': candidates,
-    };
-    return await _sendContent(
-      EventTypes.CallCandidates,
-      content,
-      txid: txid,
-    );
-  }
-
-  /// This event is sent by the callee when they wish to answer the call.
-  /// [callId] is a unique identifier for the call.
-  /// [version] is the version of the VoIP specification this message adheres to. This specification is version 1.
-  /// [type] The type of session description. Must be 'answer'.
-  /// [sdp] The SDP text of the session description.
-  /// [party_id] The party ID for call, Can be set to client.deviceId.
-  Future<String?> answerCall(String callId, String sdp, String party_id,
-      {String type = 'answer',
-      String version = voipProtoVersion,
-      String? txid,
-      CallCapabilities? capabilities,
-      SDPStreamMetadata? metadata}) async {
-    txid ??= 'txid${DateTime.now().millisecondsSinceEpoch}';
-    final content = {
-      'call_id': callId,
-      'party_id': party_id,
-      'version': version,
-      'answer': {'sdp': sdp, 'type': type},
-      if (capabilities != null) 'capabilities': capabilities.toJson(),
-      if (metadata != null) sdpStreamMetadataKey: metadata.toJson(),
-    };
-    return await _sendContent(
-      EventTypes.CallAnswer,
-      content,
-      txid: txid,
-    );
-  }
-
-  /// This event is sent by the callee when they wish to answer the call.
-  /// [callId] The ID of the call this event relates to.
-  /// [version] is the version of the VoIP specification this message adheres to. This specification is version 1.
-  /// [party_id] The party ID for call, Can be set to client.deviceId.
-  Future<String?> hangupCall(
-      String callId, String party_id, String? hangupCause,
-      {String version = voipProtoVersion, String? txid}) async {
-    txid ??= 'txid${DateTime.now().millisecondsSinceEpoch}';
-
-    final content = {
-      'call_id': callId,
-      'party_id': party_id,
-      'version': version,
-      if (hangupCause != null) 'reason': hangupCause,
-    };
-    return await _sendContent(
-      EventTypes.CallHangup,
-      content,
-      txid: txid,
-    );
-  }
-
-  /// Send SdpStreamMetadata Changed event.
-  ///
-  /// This MSC also adds a new call event m.call.sdp_stream_metadata_changed,
-  /// which has the common VoIP fields as specified in
-  /// MSC2746 (version, call_id, party_id) and a sdp_stream_metadata object which
-  /// is the same thing as sdp_stream_metadata in m.call.negotiate, m.call.invite
-  /// and m.call.answer. The client sends this event the when sdp_stream_metadata
-  /// has changed but no negotiation is required
-  ///  (e.g. the user mutes their camera/microphone).
-  ///
-  /// [callId] The ID of the call this event relates to.
-  /// [version] is the version of the VoIP specification this message adheres to. This specification is version 1.
-  /// [party_id] The party ID for call, Can be set to client.deviceId.
-  /// [metadata] The sdp_stream_metadata object.
-  Future<String?> sendSDPStreamMetadataChanged(
-      String callId, String party_id, SDPStreamMetadata metadata,
-      {String version = voipProtoVersion, String? txid}) async {
-    txid ??= 'txid${DateTime.now().millisecondsSinceEpoch}';
-    final content = {
-      'call_id': callId,
-      'party_id': party_id,
-      'version': version,
-      sdpStreamMetadataKey: metadata.toJson(),
-    };
-    return await _sendContent(
-      EventTypes.CallSDPStreamMetadataChangedPrefix,
-      content,
-      txid: txid,
-    );
-  }
-
-  /// CallReplacesEvent for Transfered calls
-  ///
-  /// [callId] The ID of the call this event relates to.
-  /// [version] is the version of the VoIP specification this message adheres to. This specification is version 1.
-  /// [party_id] The party ID for call, Can be set to client.deviceId.
-  /// [callReplaces] transfer info
-  Future<String?> sendCallReplaces(
-      String callId, String party_id, CallReplaces callReplaces,
-      {String version = voipProtoVersion, String? txid}) async {
-    txid ??= 'txid${DateTime.now().millisecondsSinceEpoch}';
-    final content = {
-      'call_id': callId,
-      'party_id': party_id,
-      'version': version,
-      ...callReplaces.toJson(),
-    };
-    return await _sendContent(
-      EventTypes.CallReplaces,
-      content,
-      txid: txid,
-    );
-  }
-
-  /// send AssertedIdentity event
-  ///
-  /// [callId] The ID of the call this event relates to.
-  /// [version] is the version of the VoIP specification this message adheres to. This specification is version 1.
-  /// [party_id] The party ID for call, Can be set to client.deviceId.
-  /// [assertedIdentity] the asserted identity
-  Future<String?> sendAssertedIdentity(
-      String callId, String party_id, AssertedIdentity assertedIdentity,
-      {String version = voipProtoVersion, String? txid}) async {
-    txid ??= 'txid${DateTime.now().millisecondsSinceEpoch}';
-    final content = {
-      'call_id': callId,
-      'party_id': party_id,
-      'version': version,
-      'asserted_identity': assertedIdentity.toJson(),
-    };
-    return await _sendContent(
-      EventTypes.CallAssertedIdentity,
-      content,
-      txid: txid,
-    );
-  }
 
   /// A room may be public meaning anyone can join the room without any prior action. Alternatively,
   /// it can be invite meaning that a user who wishes to join the room must first receive an invite

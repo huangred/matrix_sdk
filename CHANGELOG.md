@@ -1,3 +1,54 @@
+## [0.8.20] - 14th Apr 2022
+- fix: Wait for keys in push helper
+
+## [0.8.19] - 14th Apr 2022
+- feat: Get event from push notification
+- feat: Add more localization strings and add default matrix localizations
+- fix: Ignore no permission errors on requesting users
+
+## [0.8.18] - 8th Apr 2022
+- feat: check thumbnail size
+- feat: fallback to thumbnail preview
+- fix: Retry sending a file event
+
+## [0.8.17] - 4th Apr 2022
+- chore: Allow custom image resizer to be an async method
+
+## [0.8.16] - 3th Apr 2022
+- fix: Missing type check in power level calculation
+- fix: Post load all users on room opening
+- fix: Better fallback message for member events without any change
+- fix: Store sending files in database and fix retrying to send them
+
+## [0.8.15] - 30th Mar 2022
+- feat: Pass through a custom image resize function to the client
+- feat: Display dummy event in timeline for sending files
+- chore: Move the call methods in room to the voip class.
+- fix: properly create the directory for the pub credentials
+
+## [0.8.14] - 25th Mar 2022
+- feat: added doc (Henri Carnot)
+- feat: add some more tests (Henri Carnot)
+- feat: allow removing markdown formating (Henri Carnot)
+- feat: Get event in a room faster by searching in database (Christian Pauly)
+- feat: implement mofifying widgets (TheOneWithTheBraid)
+- feat: Set loglevel in client constructor (Christian Pauly)
+- fix: example (Henri Carnot)
+- fix: remove pending outbound group session creation on completed or errored (Henri Carnot)
+- fix: room members loading States were used before being fetched from the database. Thus, room membership states weren't set, and so, user display names weren't be fetched from the database. (Henri Carnot)
+- refactor: Simplify relates to and make it more type safe (Christian Pauly)
+
+## [0.8.13] - 02nd Mar 2022
+- fix: send oldusername in displayname changed event
+- fix: Dont encrypt reactions
+- refactor: Make MatrixFile final and move all image calculation into isolate
+- fix: own profile containing mxid
+- chore: Update fluffybox
+
+## [0.8.12] - 02nd Mar 2022
+- fix: Rooms sort order after login
+- fix: Change password using email authentication
+
 ## [0.8.11] - 19nd Feb 2022
 - fix: Change password using email authentication
 

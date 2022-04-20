@@ -19,11 +19,15 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:collection/collection.dart';
+import 'package:html/parser.dart';
 import 'package:http/http.dart' as http;
+import 'package:matrix/src/utils/file_send_request_credentials.dart';
 
 import '../matrix.dart';
 import 'utils/event_localizations.dart';
 import 'utils/html_to_text.dart';
+import 'utils/markdown.dart';
 
 abstract class RelationshipTypes {
   static const String reply = 'm.in_reply_to';
@@ -132,6 +136,18 @@ class Event extends MatrixEvent {
           ),
         );
       }
+    }
+
+    // If this is failed to send and the file is no longer cached, it should be removed!
+    if (!status.isSent &&
+        {
+          MessageTypes.Image,
+          MessageTypes.Video,
+          MessageTypes.Audio,
+          MessageTypes.File,
+        }.contains(messageType) &&
+        !room.sendingFilePlaceholders.containsKey(eventId)) {
+      remove();
     }
   }
 
@@ -324,13 +340,42 @@ class Event extends MatrixEvent {
   /// Try to send this event again. Only works with events of status -1.
   Future<String?> sendAgain({String? txid}) async {
     if (!status.isError) return null;
+
+    // Retry sending a file:
+    if ({
+      MessageTypes.Image,
+      MessageTypes.Video,
+      MessageTypes.Audio,
+      MessageTypes.File,
+    }.contains(messageType)) {
+      final file = room.sendingFilePlaceholders[eventId];
+      if (file == null) {
+        await remove();
+        throw Exception('Can not try to send again. File is no longer cached.');
+      }
+      final thumbnail = room.sendingFileThumbnails[eventId];
+      final credentials = FileSendRequestCredentials.fromJson(unsigned ?? {});
+      final inReplyTo = credentials.inReplyTo == null
+          ? null
+          : await room.getEventById(credentials.inReplyTo!);
+      txid ??= unsigned?.tryGet<String>('transaction_id');
+      return await room.sendFileEvent(
+        file,
+        txid: txid,
+        thumbnail: thumbnail,
+        inReplyTo: inReplyTo,
+        editEventId: credentials.editEventId,
+        shrinkImageMaxDimension: credentials.shrinkImageMaxDimension,
+        extraContent: credentials.extraContent,
+      );
+    }
+
     // we do not remove the event here. It will automatically be updated
     // in the `sendEvent` method to transition -1 -> 0 -> 1 -> 2
-    final newEventId = await room.sendEvent(
+    return await room.sendEvent(
       content,
       txid: txid ?? unsigned?['transaction_id'] ?? eventId,
     );
-    return newEventId;
   }
 
   /// Whether the client is allowed to redact this event.
@@ -515,6 +560,10 @@ class Event extends MatrixEvent {
     if (![EventTypes.Message, EventTypes.Sticker].contains(type)) {
       throw ("This event has the type '$type' and so it can't contain an attachment.");
     }
+    if (status.isSending) {
+      final localFile = room.sendingFilePlaceholders[eventId];
+      if (localFile != null) return localFile;
+    }
     final database = room.client.database;
     final mxcUrl = attachmentOrThumbnailMxcUrl(getThumbnail: getThumbnail);
     if (mxcUrl == null) {
@@ -581,13 +630,14 @@ class Event extends MatrixEvent {
   /// room list you may find [withSenderNamePrefix] useful. Set [hideReply] to
   /// crop all lines starting with '>'. With [plaintextBody] it'll use the
   /// plaintextBody instead of the normal body.
-  String getLocalizedBody(
-    MatrixLocalizations i18n, {
-    bool withSenderNamePrefix = false,
-    bool hideReply = false,
-    bool hideEdit = false,
-    bool plaintextBody = false,
-  }) {
+  /// [removeMarkdown] allow to remove the markdown formating from the event body.
+  /// Usefull form message preview or notifications text.
+  String getLocalizedBody(MatrixLocalizations i18n,
+      {bool withSenderNamePrefix = false,
+      bool hideReply = false,
+      bool hideEdit = false,
+      bool plaintextBody = false,
+      bool removeMarkdown = false}) {
     if (redacted) {
       return i18n.removedBy(redactedBecause?.sender.calcDisplayname() ?? '');
     }
@@ -621,6 +671,16 @@ class Event extends MatrixEvent {
       body = body.replaceFirst(
           RegExp(r'^>( \*)? <[^>]+>[^\n\r]+\r?\n(> [^\n]*\r?\n)*\r?\n'), '');
     }
+
+    // return the html tags free body
+    if (removeMarkdown == true) {
+      final html = markdown(body);
+      final document = parse(
+        html,
+      );
+      body = document.documentElement?.text ?? body;
+    }
+
     final callback = EventLocalizations.localizationsMap[type];
     var localizedBody = i18n.unknownEvent(type);
     if (callback != null) {
@@ -673,17 +733,11 @@ class Event extends MatrixEvent {
 
   /// Get the event ID that this relationship will reference. `null` if there is none
   String? get relationshipEventId {
-    if (!(content['m.relates_to'] is Map)) {
-      return null;
-    }
-    if (content['m.relates_to'].containsKey('event_id')) {
-      return content['m.relates_to']['event_id'];
-    }
-    if (content['m.relates_to']['m.in_reply_to'] is Map &&
-        content['m.relates_to']['m.in_reply_to'].containsKey('event_id')) {
-      return content['m.relates_to']['m.in_reply_to']['event_id'];
-    }
-    return null;
+    final relatesToMap = content.tryGetMap<String, dynamic>('m.relates_to');
+    return relatesToMap?.tryGet<String>('event_id') ??
+        relatesToMap
+            ?.tryGetMap<String, dynamic>('m.in_reply_to')
+            ?.tryGet<String>('event_id');
   }
 
   /// Get whether this event has aggregated events from a certain [type]
@@ -789,4 +843,19 @@ class Event extends MatrixEvent {
       return _countEmojiRegex.allMatches(plaintextBody).length;
     }
   }
+
+  /// If this event is in Status SENDING and it aims to send a file, then this
+  /// shows the status of the file sending.
+  FileSendingStatus? get fileSendingStatus {
+    final status = unsigned?.tryGet<String>(fileSendingStatusKey);
+    if (status == null) return null;
+    return FileSendingStatus.values.singleWhereOrNull(
+        (fileSendingStatus) => fileSendingStatus.name == status);
+  }
+}
+
+enum FileSendingStatus {
+  generatingThumbnail,
+  encrypting,
+  uploading,
 }

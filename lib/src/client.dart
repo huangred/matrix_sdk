@@ -102,6 +102,11 @@ class Client extends MatrixApi {
     return await function(arg);
   }
 
+  final Duration sendTimelineEventTimeout;
+
+  Future<MatrixImageFileResizedResponse?> Function(
+      MatrixImageFileResizeArguments)? customImageResizer;
+
   /// Create a client
   /// [clientName] = unique identifier of this client
   /// [databaseBuilder]: A function that creates the database instance, that will be used.
@@ -137,6 +142,10 @@ class Client extends MatrixApi {
   /// will use lazy_load_members.
   /// Set [compute] to the Flutter compute method to enable the SDK to run some
   /// code in background.
+  /// Set [timelineEventTimeout] to the preferred time the Client should retry
+  /// sending events on connection problems or to `Duration.zero` to disable it.
+  /// Set [customImageResizer] to your own implementation for a more advanced
+  /// and faster image resizing experience.
   Client(
     this.clientName, {
     this.databaseBuilder,
@@ -157,7 +166,10 @@ class Client extends MatrixApi {
     this.mxidLocalPartFallback = true,
     this.formatLocalpart = true,
     this.compute,
+    Level? logLevel,
     Filter? syncFilter,
+    this.sendTimelineEventTimeout = const Duration(minutes: 1),
+    this.customImageResizer,
     @deprecated bool? debug,
   })  : syncFilter = syncFilter ??
             Filter(
@@ -174,6 +186,7 @@ class Client extends MatrixApi {
         super(
             httpClient:
                 VariableTimeoutHttpClient(httpClient ?? http.Client())) {
+    if (logLevel != null) Logs().level = logLevel;
     importantStateEvents.addAll([
       EventTypes.RoomName,
       EventTypes.RoomAvatar,
@@ -190,7 +203,6 @@ class Client extends MatrixApi {
       EventTypes.Message,
       EventTypes.Encrypted,
       EventTypes.Sticker,
-      EventTypes.Reaction,
     ]);
 
     // register all the default commands
@@ -675,12 +687,14 @@ class Client extends MatrixApi {
     if (rooms.isNotEmpty) {
       final profileSet = <Profile>{};
       for (final room in rooms) {
-        final user = room.getUserByMXIDSync(userID!);
-        profileSet.add(Profile(
-          avatarUrl: user.avatarUrl,
-          displayName: user.displayName,
-          userId: user.id,
-        ));
+        final user = await room.requestUser(userID!);
+        if (user != null) {
+          profileSet.add(Profile(
+            avatarUrl: user.avatarUrl,
+            displayName: user.displayName,
+            userId: user.id,
+          ));
+        }
       }
       if (profileSet.length == 1) return profileSet.single;
     }
@@ -952,6 +966,151 @@ class Client extends MatrixApi {
       );
 
   bool _initLock = false;
+
+  /// Fetches the corresponding Event object from a notification including a
+  /// full Room object with the sender User object in it. Returns null if this
+  /// push notification is not corresponding to an existing event.
+  /// The client does **not** need to be initialized first. If it is not
+  /// initalized, it will only fetch the necessary parts of the database. This
+  /// should make it possible to run this parallel to another client with the
+  /// same client name.
+  Future<Event?> getEventByPushNotification(
+    PushNotification notification, {
+    bool storeInDatabase = true,
+    Duration timeoutForServerRequests = const Duration(seconds: 8),
+  }) async {
+    // Get access token if necessary:
+    final database = _database ??= await databaseBuilder?.call(this);
+    if (!isLogged()) {
+      if (database == null) {
+        throw Exception(
+            'Can not execute getEventByPushNotification() without a database');
+      }
+      final clientInfoMap = await database.getClient(clientName);
+      final token = clientInfoMap?.tryGet<String>('token');
+      if (token == null) {
+        throw Exception('Client is not logged in.');
+      }
+      accessToken = token;
+    }
+
+    // Check if the notification contains an event at all:
+    final eventId = notification.eventId;
+    final roomId = notification.roomId;
+    if (eventId == null || roomId == null) return null;
+
+    // Create the room object:
+    final room = getRoomById(roomId) ??
+        await database?.getSingleRoom(this, roomId) ??
+        Room(
+          id: roomId,
+          client: this,
+        );
+    final roomName = notification.roomName;
+    final roomAlias = notification.roomAlias;
+    if (roomName != null) {
+      room.setState(Event(
+        eventId: 'TEMP',
+        stateKey: '',
+        type: EventTypes.RoomName,
+        content: {'name': roomName},
+        room: room,
+        senderId: 'UNKNOWN',
+        originServerTs: DateTime.now(),
+      ));
+    }
+    if (roomAlias != null) {
+      room.setState(Event(
+        eventId: 'TEMP',
+        stateKey: '',
+        type: EventTypes.RoomCanonicalAlias,
+        content: {'alias': roomAlias},
+        room: room,
+        senderId: 'UNKNOWN',
+        originServerTs: DateTime.now(),
+      ));
+    }
+
+    // Load the event from the notification or from the database or from server:
+    MatrixEvent? matrixEvent;
+    final content = notification.content;
+    final sender = notification.sender;
+    final type = notification.type;
+    if (content != null && sender != null && type != null) {
+      matrixEvent = MatrixEvent(
+        content: content,
+        senderId: sender,
+        type: type,
+        originServerTs: DateTime.now(),
+        eventId: eventId,
+        roomId: roomId,
+      );
+    }
+    matrixEvent ??= await database
+        ?.getEventById(eventId, room)
+        .timeout(timeoutForServerRequests);
+    try {
+      matrixEvent ??= await getOneRoomEvent(roomId, eventId)
+          .timeout(timeoutForServerRequests);
+    } on MatrixException catch (_) {
+      // No access to the MatrixEvent. Search in /notifications
+      final notificationsResponse = await getNotifications();
+      matrixEvent ??= notificationsResponse.notifications
+          .firstWhereOrNull((notification) =>
+              notification.roomId == roomId &&
+              notification.event.eventId == eventId)
+          ?.event;
+    }
+
+    if (matrixEvent == null) {
+      throw Exception('Unable to find event for this push notification!');
+    }
+
+    // Load the sender of this event
+    try {
+      await room
+          .requestUser(matrixEvent.senderId)
+          .timeout(timeoutForServerRequests);
+    } catch (e, s) {
+      Logs().w('Unable to request user for push helper', e, s);
+      final senderDisplayName = notification.senderDisplayName;
+      if (senderDisplayName != null && sender != null) {
+        room.setState(User(sender, displayName: senderDisplayName, room: room));
+      }
+    }
+
+    // Create Event object and decrypt if necessary
+    var event = Event.fromMatrixEvent(
+      matrixEvent,
+      room,
+      status: EventStatus.sent,
+    );
+
+    final encryption = this.encryption;
+    if (event.type == EventTypes.Encrypted && encryption != null) {
+      var decrypted = await encryption.decryptRoomEvent(roomId, event);
+      if (decrypted.messageType == MessageTypes.BadEncrypted &&
+          prevBatch != null) {
+        await oneShotSync();
+        decrypted = await encryption.decryptRoomEvent(roomId, event);
+      }
+      event = decrypted;
+    }
+
+    if (storeInDatabase) {
+      await database?.transaction(() async {
+        await database.storeEventUpdate(
+            EventUpdate(
+              roomID: roomId,
+              type: EventUpdateType.timeline,
+              content: event.toJson(),
+            ),
+            this);
+      });
+    }
+
+    return event;
+  }
 
   /// Sets the user credentials and starts the synchronisation.
   ///
@@ -1744,7 +1903,7 @@ class Client extends MatrixApi {
               .compareTo(a.timeCreated.millisecondsSinceEpoch);
 
   void _sortRooms() {
-    if (prevBatch == null || _sortLock || rooms.length < 2) return;
+    if (_sortLock || rooms.length < 2) return;
     _sortLock = true;
     rooms.sort(sortRoomsBy);
     _sortLock = false;
